@@ -1,10 +1,9 @@
-// PipboyDoF v2 - F4SE plugin (CommonLibF4)
-// 普段は被写界深度(DoF)を無効、Pip-Boyメニューを開いている間だけ有効にする。
+// PipboyDoF - F4SE plugin (CommonLibF4, 旧版 1.10.163 対応)
 //
-// v2の変更点:
-//  - bDoDepthOfField は Fallout4Prefs.ini の設定なので、INIPrefSettingCollection側も探すようにした
-//    (v1は INISettingCollection だけを見ていたため、設定が見つからず何も起きていなかった可能性が高い)
-//  - 診断用ログ(PipboyDoF.log)を出力するようにした
+// 普段は被写界深度(DoF)を無効にし、Pip-Boyメニューを開いている間だけ有効にする。
+// DoFの設定は Fallout4Prefs.ini の bDoDepthOfField(セクション [Imagespace])。
+//
+// ログ: ドキュメント\My Games\Fallout4\F4SE\PipboyDoF.log (起動のたびに作り直される)
 
 #include "F4SE/F4SE.h"
 #include "RE/Fallout.h"
@@ -15,10 +14,21 @@
 #include <mutex>
 #include <string>
 
+#ifndef NOMINMAX
+#	define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#	define WIN32_LEAN_AND_MEAN
+#endif
+#include <ShlObj.h>
+#pragma comment(lib, "shell32.lib")
+
 namespace
 {
+	// true にすると、すべてのメニューの開閉と、切り替えのたびのログを出す(不具合調査用)
+	constexpr bool kVerbose = false;
+
 	// DoFの設定名の候補。INIの [セクション] によって名前が変わるため、複数を順に試す。
-	// (Skyrimでは SkyrimPrefs.ini の [Imagespace] にあり、Fallout 4でも同様の可能性が高い)
 	constexpr const char* kDoFSettingNames[] = {
 		"bDoDepthOfField:Imagespace",
 		"bDoDepthOfField:Display",
@@ -28,22 +38,40 @@ namespace
 	constexpr auto kPipboyMenu = "PipboyMenu";
 
 	std::mutex g_logLock;
+	bool g_logStarted = false;
 
-	// 診断用ログ。次の2か所に書く:
-	//  (1) %TEMP% フォルダの PipboyDoF.log (エクスプローラーのアドレス欄に %TEMP% と入力すると開ける)
-	//  (2) ゲームの実行フォルダ(MO2経由ならOverwriteフォルダ)の PipboyDoF.log
+	// ドキュメント\My Games\<ゲーム名>\F4SE フォルダを探す。見つからなければ空のパスを返す。
+	std::filesystem::path FindF4SELogDir()
+	{
+		wchar_t buffer[MAX_PATH]{};
+		if (FAILED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, SHGFP_TYPE_CURRENT, buffer))) {
+			return {};
+		}
+
+		const std::filesystem::path myGames = std::filesystem::path(buffer) / L"My Games";
+		for (const wchar_t* game : { L"Fallout4", L"Fallout4 GOG", L"Fallout4 EPIC" }) {
+			std::error_code ec;
+			const auto dir = myGames / game / L"F4SE";
+			if (std::filesystem::is_directory(dir, ec)) {
+				return dir;
+			}
+		}
+		return {};
+	}
+
 	void Log(const std::string& a_msg)
 	{
 		std::lock_guard<std::mutex> lock(g_logLock);
 
 		try {
-			std::ofstream file(std::filesystem::temp_directory_path() / "PipboyDoF.log", std::ios::app);
-			file << a_msg << "\n";
-		} catch (...) {
-		}
+			static const std::filesystem::path path = [] {
+				auto dir = FindF4SELogDir();
+				return dir.empty() ? std::filesystem::temp_directory_path() / "PipboyDoF.log" : dir / "PipboyDoF.log";
+			}();
 
-		try {
-			std::ofstream file("PipboyDoF.log", std::ios::app);
+			// 起動後の最初の書き込みだけ、ファイルを作り直す(ログが増え続けないように)
+			std::ofstream file(path, g_logStarted ? std::ios::app : std::ios::trunc);
+			g_logStarted = true;
 			file << a_msg << "\n";
 		} catch (...) {
 		}
@@ -75,7 +103,7 @@ namespace
 		return nullptr;
 	}
 
-	void SetDoF(bool a_enable)
+	void SetDoF(bool a_enable, bool a_forceLog = false)
 	{
 		std::string where;
 		auto setting = FindDoFSetting(where);
@@ -88,8 +116,10 @@ namespace
 		setting->SetBinary(a_enable);
 		const bool after = setting->GetBinary();
 
-		Log(std::string("SetDoF(") + (a_enable ? "true" : "false") + "): found in " + where +
-			", before=" + (before ? "1" : "0") + ", after=" + (after ? "1" : "0"));
+		if (kVerbose || a_forceLog) {
+			Log(std::string("SetDoF(") + (a_enable ? "true" : "false") + "): found in " + where +
+				", before=" + (before ? "1" : "0") + ", after=" + (after ? "1" : "0"));
+		}
 	}
 
 	class MenuSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
@@ -105,8 +135,9 @@ namespace
 			const RE::MenuOpenCloseEvent& a_event,
 			RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override
 		{
-			// 診断用: すべてのメニューの開閉をログに残す(Pip-Boyのメニュー名の確認用)
-			Log(std::string("menu: ") + a_event.menuName.c_str() + (a_event.opening ? " opened" : " closed"));
+			if (kVerbose) {
+				Log(std::string("menu: ") + a_event.menuName.c_str() + (a_event.opening ? " opened" : " closed"));
+			}
 
 			// Pip-Boyを開いたらDoF有効、閉じたら無効
 			if (a_event.menuName == kPipboyMenu) {
@@ -119,10 +150,8 @@ namespace
 	void OnF4SEMessage(F4SE::MessagingInterface::Message* a_msg)
 	{
 		if (a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
-			Log("kGameDataReady");
-
-			// 起動時は常にDoF無効
-			SetDoF(false);
+			// 起動時は常にDoF無効(結果はログに残す)
+			SetDoF(false, true);
 
 			if (auto ui = RE::UI::GetSingleton()) {
 				ui->RegisterSink(MenuSink::GetSingleton());
@@ -136,13 +165,11 @@ namespace
 
 // ---- F4SEにプラグインとして認識させるための宣言 ----
 // 旧版ゲーム(1.10.163)用のF4SE 0.6.23 は、古い形式の F4SEPlugin_Query という関数で
-// プラグインかどうかを判断する。これが無いと「does not appear to be an F4SE plugin」になる。
-//
-// ライブラリ側が F4SEPlugin_Query を既に提供している場合に、二重定義エラーにならないよう、
-// 「別名の関数」として定義し、リンカーの /alternatename で「無い場合だけ」この関数を使う。
+// プラグインかどうかを判断する。
+// ライブラリ側が F4SEPlugin_Query を既に提供している場合に二重定義にならないよう、
+// 別名の関数として定義し、リンカーの /alternatename で「無い場合だけ」この関数を使う。
 extern "C" bool PipboyDoF_QueryImpl(const F4SE::QueryInterface*, F4SE::PluginInfo* a_info)
 {
-	Log("F4SEPlugin_Query called");
 	a_info->infoVersion = F4SE::PluginInfo::kVersion;
 	a_info->name = "PipboyDoF";
 	a_info->version = 1;
@@ -157,11 +184,8 @@ extern "C" bool PipboyDoF_QueryImpl(const F4SE::QueryInterface*, F4SE::PluginInf
 
 F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
 {
-	Log("F4SEPlugin_Load entered (before Init)");
-
 	try {
 		F4SE::Init(a_f4se);
-		Log("F4SE::Init ok");
 	} catch (const std::exception& e) {
 		Log(std::string("F4SE::Init threw: ") + e.what());
 		return false;
@@ -170,11 +194,10 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
 		return false;
 	}
 
-	Log("PipboyDoF v4 loaded");
+	Log("PipboyDoF loaded");
 
 	if (auto messaging = F4SE::GetMessagingInterface()) {
 		messaging->RegisterListener(OnF4SEMessage);
-		Log("messaging listener registered");
 	} else {
 		Log("messaging interface not found");
 	}
