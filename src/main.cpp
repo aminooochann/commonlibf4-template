@@ -17,7 +17,14 @@
 
 namespace
 {
-	constexpr auto kDoFSetting = "bDoDepthOfField:Display";
+	// DoFの設定名の候補。INIの [セクション] によって名前が変わるため、複数を順に試す。
+	// (Skyrimでは SkyrimPrefs.ini の [Imagespace] にあり、Fallout 4でも同様の可能性が高い)
+	constexpr const char* kDoFSettingNames[] = {
+		"bDoDepthOfField:Imagespace",
+		"bDoDepthOfField:Display",
+		"bDepthOfField:Imagespace",
+		"bDepthOfField:Display",
+	};
 	constexpr auto kPipboyMenu = "PipboyMenu";
 
 	std::mutex g_logLock;
@@ -42,32 +49,38 @@ namespace
 		}
 	}
 
-	RE::Setting* FindDoFSetting(const char*& a_where)
+	RE::Setting* FindDoFSetting(std::string& a_where)
 	{
-		if (auto pref = RE::INIPrefSettingCollection::GetSingleton()) {
-			if (auto setting = pref->GetSetting(kDoFSetting)) {
-				a_where = "INIPrefSettingCollection";
-				return setting;
+		auto pref = RE::INIPrefSettingCollection::GetSingleton();
+		auto ini = RE::INISettingCollection::GetSingleton();
+
+		for (auto name : kDoFSettingNames) {
+			if (pref) {
+				if (auto setting = pref->GetSetting(name)) {
+					a_where = std::string("INIPrefSettingCollection / ") + name;
+					return setting;
+				}
+			}
+
+			if (ini) {
+				if (auto setting = ini->GetSetting(name)) {
+					a_where = std::string("INISettingCollection / ") + name;
+					return setting;
+				}
 			}
 		}
 
-		if (auto ini = RE::INISettingCollection::GetSingleton()) {
-			if (auto setting = ini->GetSetting(kDoFSetting)) {
-				a_where = "INISettingCollection";
-				return setting;
-			}
-		}
-
-		a_where = "none";
+		a_where = std::string("none (pref singleton ") + (pref ? "ok" : "NULL") +
+		          ", ini singleton " + (ini ? "ok" : "NULL") + ")";
 		return nullptr;
 	}
 
 	void SetDoF(bool a_enable)
 	{
-		const char* where = "none";
+		std::string where;
 		auto setting = FindDoFSetting(where);
 		if (!setting) {
-			Log(std::string("SetDoF(") + (a_enable ? "true" : "false") + "): setting NOT found");
+			Log(std::string("SetDoF(") + (a_enable ? "true" : "false") + "): setting NOT found: " + where);
 			return;
 		}
 
@@ -157,7 +170,7 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
 		return false;
 	}
 
-	Log("PipboyDoF v3 loaded");
+	Log("PipboyDoF v4 loaded");
 
 	if (auto messaging = F4SE::GetMessagingInterface()) {
 		messaging->RegisterListener(OnF4SEMessage);
