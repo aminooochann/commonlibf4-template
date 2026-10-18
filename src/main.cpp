@@ -118,18 +118,8 @@ extern "C" __declspec(dllexport) bool F4SEPlugin_Query(const F4SE::QueryInterfac
 	return true;
 }
 
-// 新しいF4SE(NG版など)用の宣言。旧版では使われないが、あっても問題ない。
-F4SE_EXPORT constinit auto F4SEPlugin_Version = []() noexcept {
-	F4SE::PluginVersionData data{};
-	data.PluginVersion({ 1, 0, 0, 0 });
-	data.PluginName("PipboyDoF");
-	data.AuthorName("user");
-	data.UsesAddressLibrary(true);
-	data.IsLayoutDependent(true);
-	data.HasNoStructUse(false);
-	data.CompatibleVersions({ REL::Version{ 1, 10, 163, 0 } });
-	return data;
-}();
+// 新しいF4SE用の F4SEPlugin_Version は、テンプレート側(commonlibf4-plugin.cpp)が
+// 自動生成するため、ここには書かない(書くと「already defined」で二重定義エラーになる)。
 
 F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
 {
