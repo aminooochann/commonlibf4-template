@@ -1,0 +1,41 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (submodules included)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup xmake
+        uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: latest
+
+      - name: Configure
+        run: xmake f -m release -y
+
+      - name: Build
+        run: xmake build -y
+
+      - name: Rename DLL to PipboyDoF.dll
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path build -Recurse -Filter *.dll | Select-Object -First 1
+          if (-not $dll) { throw "DLL not found under build/" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $dll.FullName dist/PipboyDoF.dll
+          Get-ChildItem dist
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: PipboyDoF
+          path: dist/PipboyDoF.dll
+          if-no-files-found: error
