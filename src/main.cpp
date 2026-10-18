@@ -9,6 +9,8 @@
 #include "F4SE/F4SE.h"
 #include "RE/Fallout.h"
 
+#include <exception>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -20,12 +22,24 @@ namespace
 
 	std::mutex g_logLock;
 
-	// ゲームの実行フォルダ(MO2経由ならOverwriteフォルダ)に PipboyDoF.log を書く
+	// 診断用ログ。次の2か所に書く:
+	//  (1) %TEMP% フォルダの PipboyDoF.log (エクスプローラーのアドレス欄に %TEMP% と入力すると開ける)
+	//  (2) ゲームの実行フォルダ(MO2経由ならOverwriteフォルダ)の PipboyDoF.log
 	void Log(const std::string& a_msg)
 	{
 		std::lock_guard<std::mutex> lock(g_logLock);
-		std::ofstream file("PipboyDoF.log", std::ios::app);
-		file << a_msg << "\n";
+
+		try {
+			std::ofstream file(std::filesystem::temp_directory_path() / "PipboyDoF.log", std::ios::app);
+			file << a_msg << "\n";
+		} catch (...) {
+		}
+
+		try {
+			std::ofstream file("PipboyDoF.log", std::ios::app);
+			file << a_msg << "\n";
+		} catch (...) {
+		}
 	}
 
 	RE::Setting* FindDoFSetting(const char*& a_where)
@@ -112,6 +126,7 @@ namespace
 // プラグインかどうかを判断する。これが無いと「does not appear to be an F4SE plugin」になる。
 extern "C" __declspec(dllexport) bool F4SEPlugin_Query(const F4SE::QueryInterface*, F4SE::PluginInfo* a_info)
 {
+	Log("F4SEPlugin_Query called");
 	a_info->infoVersion = F4SE::PluginInfo::kVersion;
 	a_info->name = "PipboyDoF";
 	a_info->version = 1;
@@ -123,11 +138,26 @@ extern "C" __declspec(dllexport) bool F4SEPlugin_Query(const F4SE::QueryInterfac
 
 F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
 {
-	F4SE::Init(a_f4se);
-	Log("PipboyDoF v2 loaded");
+	Log("F4SEPlugin_Load entered (before Init)");
+
+	try {
+		F4SE::Init(a_f4se);
+		Log("F4SE::Init ok");
+	} catch (const std::exception& e) {
+		Log(std::string("F4SE::Init threw: ") + e.what());
+		return false;
+	} catch (...) {
+		Log("F4SE::Init threw an unknown exception");
+		return false;
+	}
+
+	Log("PipboyDoF v3 loaded");
 
 	if (auto messaging = F4SE::GetMessagingInterface()) {
 		messaging->RegisterListener(OnF4SEMessage);
+		Log("messaging listener registered");
+	} else {
+		Log("messaging interface not found");
 	}
 
 	return true;
