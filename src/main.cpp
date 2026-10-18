@@ -124,7 +124,10 @@ namespace
 // ---- F4SEにプラグインとして認識させるための宣言 ----
 // 旧版ゲーム(1.10.163)用のF4SE 0.6.23 は、古い形式の F4SEPlugin_Query という関数で
 // プラグインかどうかを判断する。これが無いと「does not appear to be an F4SE plugin」になる。
-extern "C" __declspec(dllexport) bool F4SEPlugin_Query(const F4SE::QueryInterface*, F4SE::PluginInfo* a_info)
+//
+// ライブラリ側が F4SEPlugin_Query を既に提供している場合に、二重定義エラーにならないよう、
+// 「別名の関数」として定義し、リンカーの /alternatename で「無い場合だけ」この関数を使う。
+extern "C" bool PipboyDoF_QueryImpl(const F4SE::QueryInterface*, F4SE::PluginInfo* a_info)
 {
 	Log("F4SEPlugin_Query called");
 	a_info->infoVersion = F4SE::PluginInfo::kVersion;
@@ -132,6 +135,9 @@ extern "C" __declspec(dllexport) bool F4SEPlugin_Query(const F4SE::QueryInterfac
 	a_info->version = 1;
 	return true;
 }
+
+#pragma comment(linker, "/alternatename:F4SEPlugin_Query=PipboyDoF_QueryImpl")
+#pragma comment(linker, "/export:F4SEPlugin_Query")
 
 // 新しいF4SE用の F4SEPlugin_Version は、テンプレート側(commonlibf4-plugin.cpp)が
 // 自動生成するため、ここには書かない(書くと「already defined」で二重定義エラーになる)。
