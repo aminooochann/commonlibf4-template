@@ -107,8 +107,21 @@ namespace
 	}
 }
 
-// プラグインのバージョン情報は、libxse/commonlibf4-template の xmake.lua 側で
-// 自動生成されるため、ここには書かない(二重定義になるため)。
+// ---- F4SEにプラグインとして認識させるための宣言 ----
+// f4se.log に「does not appear to be an F4SE plugin」と出た原因は、この宣言が無かったこと。
+// 対象のゲームは 1.10.163(旧版)。
+F4SE_EXPORT constinit auto F4SEPlugin_Version = []() noexcept {
+	F4SE::PluginVersionData data{};
+	data.PluginVersion({ 1, 0, 0, 0 });
+	data.PluginName("PipboyDoF");
+	data.AuthorName("user");
+	data.UsesAddressLibrary(true);
+	data.IsLayoutDependent(true);
+	data.HasNoStructUse(false);
+	data.CompatibleVersions({ REL::Version{ 1, 10, 163, 0 } });
+	return data;
+}();
+
 F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
 {
 	F4SE::Init(a_f4se);
