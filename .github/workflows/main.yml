@@ -39,3 +39,17 @@ jobs:
           name: PipboyDoF
           path: dist/PipboyDoF.dll
           if-no-files-found: error
+
+      # ブラウザが .dll を危険と判定してダウンロードを拒否する場合の回避用。
+      # 拡張子を .txt にしたコピーも、別のArtifactとして出力する。
+      # ダウンロード後に、ファイル名を PipboyDoF.dll に戻して使う。
+      - name: Prepare .txt copy
+        shell: pwsh
+        run: Copy-Item dist/PipboyDoF.dll dist/PipboyDoF.dll.txt
+
+      - name: Upload .txt copy
+        uses: actions/upload-artifact@v4
+        with:
+          name: PipboyDoF-txt
+          path: dist/PipboyDoF.dll.txt
+          if-no-files-found: error
