@@ -13,6 +13,15 @@ jobs:
         with:
           submodules: recursive
 
+      # テンプレート標準のライブラリ(libxse版)は旧版ゲーム(1.10.163)に対応していないため、
+      # OG / NG / AE の3つに対応した Dear-Modding 版の CommonLibF4 に差し替える。
+      - name: Swap CommonLibF4 to the multi-runtime fork
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force lib/commonlibf4
+          git clone --recurse-submodules https://github.com/Dear-Modding-FO4/commonlibf4 lib/commonlibf4
+          Get-ChildItem lib/commonlibf4
+
       - name: Setup xmake
         uses: xmake-io/github-action-setup-xmake@v1
         with:
