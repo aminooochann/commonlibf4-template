@@ -24,9 +24,18 @@ jobs:
       - name: Build
         run: xmake build -y
 
+      - name: Rename DLL to PipboyDoF.dll
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Path build -Recurse -Filter *.dll | Select-Object -First 1
+          if (-not $dll) { throw "DLL not found under build/" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item $dll.FullName dist/PipboyDoF.dll
+          Get-ChildItem dist
+
       - name: Upload DLL
         uses: actions/upload-artifact@v4
         with:
           name: PipboyDoF
-          path: build/**/*.dll
+          path: dist/PipboyDoF.dll
           if-no-files-found: error
