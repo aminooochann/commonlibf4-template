@@ -108,8 +108,17 @@ namespace
 }
 
 // ---- F4SEにプラグインとして認識させるための宣言 ----
-// f4se.log に「does not appear to be an F4SE plugin」と出た原因は、この宣言が無かったこと。
-// 対象のゲームは 1.10.163(旧版)。
+// 旧版ゲーム(1.10.163)用のF4SE 0.6.23 は、古い形式の F4SEPlugin_Query という関数で
+// プラグインかどうかを判断する。これが無いと「does not appear to be an F4SE plugin」になる。
+extern "C" __declspec(dllexport) bool F4SEPlugin_Query(const F4SE::QueryInterface*, F4SE::PluginInfo* a_info)
+{
+	a_info->infoVersion = F4SE::PluginInfo::kVersion;
+	a_info->name = "PipboyDoF";
+	a_info->version = 1;
+	return true;
+}
+
+// 新しいF4SE(NG版など)用の宣言。旧版では使われないが、あっても問題ない。
 F4SE_EXPORT constinit auto F4SEPlugin_Version = []() noexcept {
 	F4SE::PluginVersionData data{};
 	data.PluginVersion({ 1, 0, 0, 0 });
