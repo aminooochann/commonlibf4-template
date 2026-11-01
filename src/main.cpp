@@ -1,6 +1,8 @@
 // PipboyDoF - F4SE plugin (CommonLibF4, 旧版 1.10.163 対応)
 //
-// 普段は被写界深度(DoF)を無効にし、Pip-Boyメニューを開いている間だけ有効にする。
+// 普段は被写界深度(DoF)を無効にし、次の間だけ有効にする:
+//   - Pip-Boyメニューを開いている間
+//   - 水中にいる間(泳いでいる/潜っている間)
 // DoFの設定は Fallout4Prefs.ini の bDoDepthOfField(セクション [Imagespace])。
 //
 // ログ: ドキュメント\My Games\Fallout4\F4SE\PipboyDoF.log (起動のたびに作り直される)
@@ -8,11 +10,15 @@
 #include "F4SE/F4SE.h"
 #include "RE/Fallout.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #ifndef NOMINMAX
 #	define NOMINMAX
@@ -25,8 +31,15 @@
 
 namespace
 {
-	// true にすると、すべてのメニューの開閉と、切り替えのたびのログを出す(不具合調査用)
+	// true にすると、すべてのメニューの開閉と、DoF切り替えのたびのログを出す(不具合調査用)
 	constexpr bool kVerbose = false;
+
+	// true にすると、水中判定に使う値(moveModeとunderWaterTimer)が変化するたびにログを出す。
+	// 水中判定が正しく動くか確認するための一時的な診断用。確認できたら false にする。
+	constexpr bool kLogWaterState = true;
+
+	// 泳ぎ状態を表す moveMode のビット位置(Skyrimと同じ並びなら 10)。ログで確認する。
+	constexpr std::uint32_t kSwimBit = 10;
 
 	// DoFの設定名の候補。INIの [セクション] によって名前が変わるため、複数を順に試す。
 	constexpr const char* kDoFSettingNames[] = {
@@ -39,6 +52,11 @@ namespace
 
 	std::mutex g_logLock;
 	bool g_logStarted = false;
+
+	std::mutex g_applyLock;
+	std::atomic<bool> g_pipboyOpen{ false };
+	std::atomic<bool> g_underwater{ false };
+	bool g_dofApplied = false;  // 現在DoFを有効にしているか(g_applyLockで保護)
 
 	// ドキュメント\My Games\<ゲーム名>\F4SE フォルダを探す。見つからなければ空のパスを返す。
 	std::filesystem::path FindF4SELogDir()
@@ -122,6 +140,70 @@ namespace
 		}
 	}
 
+	// 「Pip-Boyを開いている」または「水中にいる」ときだけDoFを有効にする。状態が変わったときだけ切り替える。
+	void Apply()
+	{
+		std::lock_guard<std::mutex> lock(g_applyLock);
+
+		const bool desired = g_pipboyOpen.load() || g_underwater.load();
+		if (desired != g_dofApplied) {
+			g_dofApplied = desired;
+			SetDoF(desired, kVerbose);
+		}
+	}
+
+	// プレイヤーが水中(泳ぎ中・潜水中)かどうかを調べる。
+	bool QueryUnderwater(std::uint32_t& a_moveMode, float& a_timer)
+	{
+		auto player = RE::PlayerCharacter::GetSingleton();
+		if (!player) {
+			return false;
+		}
+
+		a_moveMode = player->moveMode;
+		a_timer = player->underWaterTimer;
+
+		const bool swimming = ((a_moveMode >> kSwimBit) & 1u) != 0;
+		return swimming || a_timer > 0.0f;
+	}
+
+	void StartWaterWatcher()
+	{
+		std::thread([] {
+			std::uint32_t lastMoveMode = 0xFFFFFFFFu;
+			bool lastTimerPositive = false;
+			bool lastUnderwater = false;
+
+			while (true) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+				try {
+					std::uint32_t moveMode = 0;
+					float timer = 0.0f;
+					const bool underwater = QueryUnderwater(moveMode, timer);
+
+					if (kLogWaterState) {
+						const bool timerPositive = timer > 0.0f;
+						if (moveMode != lastMoveMode || timerPositive != lastTimerPositive || underwater != lastUnderwater) {
+							char buffer[160]{};
+							std::snprintf(buffer, sizeof(buffer),
+								"water: moveMode=0x%04X swimBit=%u underWaterTimer=%.2f -> underwater=%d",
+								moveMode, (moveMode >> kSwimBit) & 1u, timer, underwater ? 1 : 0);
+							Log(buffer);
+							lastMoveMode = moveMode;
+							lastTimerPositive = timerPositive;
+							lastUnderwater = underwater;
+						}
+					}
+
+					g_underwater.store(underwater);
+					Apply();
+				} catch (...) {
+				}
+			}
+		}).detach();
+	}
+
 	class MenuSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 	{
 	public:
@@ -139,9 +221,10 @@ namespace
 				Log(std::string("menu: ") + a_event.menuName.c_str() + (a_event.opening ? " opened" : " closed"));
 			}
 
-			// Pip-Boyを開いたらDoF有効、閉じたら無効
+			// Pip-Boyを開いたらDoF有効、閉じたら(水中でなければ)無効
 			if (a_event.menuName == kPipboyMenu) {
-				SetDoF(a_event.opening);
+				g_pipboyOpen.store(a_event.opening);
+				Apply();
 			}
 			return RE::BSEventNotifyControl::kContinue;
 		}
@@ -151,7 +234,11 @@ namespace
 	{
 		if (a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
 			// 起動時は常にDoF無効(結果はログに残す)
-			SetDoF(false, true);
+			{
+				std::lock_guard<std::mutex> lock(g_applyLock);
+				g_dofApplied = false;
+				SetDoF(false, true);
+			}
 
 			if (auto ui = RE::UI::GetSingleton()) {
 				ui->RegisterSink(MenuSink::GetSingleton());
@@ -159,6 +246,9 @@ namespace
 			} else {
 				Log("UI singleton not found");
 			}
+
+			StartWaterWatcher();
+			Log("water watcher started");
 		}
 	}
 }
