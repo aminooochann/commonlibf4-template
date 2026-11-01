@@ -2,8 +2,13 @@
 //
 // 普段は被写界深度(DoF)を無効にし、次の間だけ有効にする:
 //   - Pip-Boyメニューを開いている間
-//   - 水に潜っている間(水面を泳いでいるだけの間は無効)
+//   - 水中にいる間(泳いでいる間と、潜っている間)
 // DoFの設定は Fallout4Prefs.ini の bDoDepthOfField(セクション [Imagespace])。
+//
+// 負荷を抑える工夫:
+//   - DoFの設定の検索は、起動時に1回だけ行い、以後は保存したポインタを使う
+//   - 水中の監視は 0.1 秒ごとに「ビット1つとfloat1つ」を読むだけ。状態が変わったときだけ処理する
+//   - ログは、起動時と失敗時だけ(メニューの開閉などは記録しない)
 //
 // ログ: ドキュメント\My Games\Fallout4\F4SE\PipboyDoF.log (起動のたびに作り直される)
 
@@ -12,7 +17,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <cstdio>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -31,20 +35,13 @@
 
 namespace
 {
-	// true にすると、すべてのメニューの開閉と、DoF切り替えのたびのログを出す(不具合調査用)
-	constexpr bool kVerbose = false;
-
-	// true にすると、水中判定に使う値(moveModeとunderWaterTimer)が変化するたびにログを出す(調査用)。
-	constexpr bool kLogWaterState = false;
-
-	// false: 泳いでいる間(水面を含む)と、潜っている間にDoFを有効にする。
-	// true : 完全に潜っている間(頭まで水中)だけDoFを有効にする。
-	constexpr bool kOnlyWhenSubmerged = true;
-
-	// 泳ぎ状態を表す moveMode のビット位置。ログで確認済み(泳ぎ中は 0x0400 が立つ)。
+	// moveMode の中で「泳ぎ中」を表すビットの位置(ログで確認済み: 泳ぎ中は 0x0400 が立つ)
 	constexpr std::uint32_t kSwimBit = 10;
 
-	// DoFの設定名の候補。INIの [セクション] によって名前が変わるため、複数を順に試す。
+	// 水中の監視間隔
+	constexpr auto kPollInterval = std::chrono::milliseconds(100);
+
+	// DoFの設定名の候補(INIのセクションによって名前が変わるため、順に試す)
 	constexpr const char* kDoFSettingNames[] = {
 		"bDoDepthOfField:Imagespace",
 		"bDoDepthOfField:Display",
@@ -53,13 +50,16 @@ namespace
 	};
 	constexpr auto kPipboyMenu = "PipboyMenu";
 
-	std::mutex g_logLock;
-	bool g_logStarted = false;
-
-	std::mutex g_applyLock;
+	RE::Setting* g_dofSetting = nullptr;  // 起動時に1回だけ取得する
 	std::atomic<bool> g_pipboyOpen{ false };
 	std::atomic<bool> g_underwater{ false };
-	bool g_dofApplied = false;  // 現在DoFを有効にしているか(g_applyLockで保護)
+	std::atomic<bool> g_dofEnabled{ false };  // 現在DoFを有効にしているか
+	std::mutex g_applyLock;
+
+	// ---- ログ ----
+
+	std::mutex g_logLock;
+	bool g_logStarted = false;
 
 	// ドキュメント\My Games\<ゲーム名>\F4SE フォルダを探す。見つからなければ空のパスを返す。
 	std::filesystem::path FindF4SELogDir()
@@ -98,6 +98,8 @@ namespace
 		}
 	}
 
+	// ---- DoFの切り替え ----
+
 	RE::Setting* FindDoFSetting(std::string& a_where)
 	{
 		auto pref = RE::INIPrefSettingCollection::GetSingleton();
@@ -124,94 +126,63 @@ namespace
 		return nullptr;
 	}
 
-	void SetDoF(bool a_enable, bool a_forceLog = false)
+	// 「Pip-Boyを開いている」または「水中にいる」ときだけDoFを有効にする。
+	// 状態が変わったときだけ設定を書き換える。
+	void Apply()
 	{
-		std::string where;
-		auto setting = FindDoFSetting(where);
-		if (!setting) {
-			Log(std::string("SetDoF(") + (a_enable ? "true" : "false") + "): setting NOT found: " + where);
+		if (!g_dofSetting) {
 			return;
 		}
 
-		const bool before = setting->GetBinary();
-		setting->SetBinary(a_enable);
-		const bool after = setting->GetBinary();
+		const auto desired = [] { return g_pipboyOpen.load() || g_underwater.load(); };
 
-		if (kVerbose || a_forceLog) {
-			Log(std::string("SetDoF(") + (a_enable ? "true" : "false") + "): found in " + where +
-				", before=" + (before ? "1" : "0") + ", after=" + (after ? "1" : "0"));
+		// 変化がなければ、ロックも取らずにすぐ戻る(大半の呼び出しはここで終わる)
+		if (desired() == g_dofEnabled.load()) {
+			return;
 		}
-	}
 
-	// 「Pip-Boyを開いている」または「水中にいる」ときだけDoFを有効にする。状態が変わったときだけ切り替える。
-	void Apply()
-	{
 		std::lock_guard<std::mutex> lock(g_applyLock);
-
-		const bool desired = g_pipboyOpen.load() || g_underwater.load();
-		if (desired != g_dofApplied) {
-			g_dofApplied = desired;
-			SetDoF(desired, kVerbose);
+		const bool enable = desired();
+		if (enable != g_dofEnabled.load()) {
+			g_dofEnabled.store(enable);
+			g_dofSetting->SetBinary(enable);
 		}
 	}
 
-	// プレイヤーが水中(泳ぎ中・潜水中)かどうかを調べる。
-	bool QueryUnderwater(std::uint32_t& a_moveMode, float& a_timer)
+	// ---- 水中の監視 ----
+
+	// プレイヤーが水中(泳ぎ中、または潜水中)か。
+	//   泳ぎ中: moveMode の泳ぎビット  /  潜水中: underWaterTimer が動いている間
+	bool IsUnderwater()
 	{
 		auto player = RE::PlayerCharacter::GetSingleton();
 		if (!player) {
 			return false;
 		}
 
-		a_moveMode = player->moveMode;
-		a_timer = player->underWaterTimer;
-
-		// underWaterTimer は、潜っている間だけ増え、水面に出ると 0 に戻る(ログで確認済み)
-		const bool submerged = a_timer > 0.0f;
-		if (kOnlyWhenSubmerged) {
-			return submerged;
-		}
-
-		const bool swimming = ((a_moveMode >> kSwimBit) & 1u) != 0;
-		return swimming || submerged;
+		const std::uint32_t moveMode = player->moveMode;
+		return ((moveMode >> kSwimBit) & 1u) != 0 || player->underWaterTimer > 0.0f;
 	}
 
 	void StartWaterWatcher()
 	{
 		std::thread([] {
-			std::uint32_t lastMoveMode = 0xFFFFFFFFu;
-			bool lastTimerPositive = false;
-			bool lastUnderwater = false;
+			bool last = false;
 
 			while (true) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				std::this_thread::sleep_for(kPollInterval);
 
-				try {
-					std::uint32_t moveMode = 0;
-					float timer = 0.0f;
-					const bool underwater = QueryUnderwater(moveMode, timer);
-
-					if (kLogWaterState) {
-						const bool timerPositive = timer > 0.0f;
-						if (moveMode != lastMoveMode || timerPositive != lastTimerPositive || underwater != lastUnderwater) {
-							char buffer[160]{};
-							std::snprintf(buffer, sizeof(buffer),
-								"water: moveMode=0x%04X swimBit=%u underWaterTimer=%.2f -> underwater=%d",
-								moveMode, (moveMode >> kSwimBit) & 1u, timer, underwater ? 1 : 0);
-							Log(buffer);
-							lastMoveMode = moveMode;
-							lastTimerPositive = timerPositive;
-							lastUnderwater = underwater;
-						}
-					}
-
-					g_underwater.store(underwater);
+				const bool now = IsUnderwater();
+				if (now != last) {
+					last = now;
+					g_underwater.store(now);
 					Apply();
-				} catch (...) {
 				}
 			}
 		}).detach();
 	}
+
+	// ---- Pip-Boyメニューの監視 ----
 
 	class MenuSink : public RE::BSTEventSink<RE::MenuOpenCloseEvent>
 	{
@@ -226,11 +197,6 @@ namespace
 			const RE::MenuOpenCloseEvent& a_event,
 			RE::BSTEventSource<RE::MenuOpenCloseEvent>*) override
 		{
-			if (kVerbose) {
-				Log(std::string("menu: ") + a_event.menuName.c_str() + (a_event.opening ? " opened" : " closed"));
-			}
-
-			// Pip-Boyを開いたらDoF有効、閉じたら(水中でなければ)無効
 			if (a_event.menuName == kPipboyMenu) {
 				g_pipboyOpen.store(a_event.opening);
 				Apply();
@@ -239,26 +205,32 @@ namespace
 		}
 	};
 
+	// ---- 起動処理 ----
+
 	void OnF4SEMessage(F4SE::MessagingInterface::Message* a_msg)
 	{
-		if (a_msg->type == F4SE::MessagingInterface::kGameDataReady) {
-			// 起動時は常にDoF無効(結果はログに残す)
-			{
-				std::lock_guard<std::mutex> lock(g_applyLock);
-				g_dofApplied = false;
-				SetDoF(false, true);
-			}
-
-			if (auto ui = RE::UI::GetSingleton()) {
-				ui->RegisterSink(MenuSink::GetSingleton());
-				Log("MenuSink registered");
-			} else {
-				Log("UI singleton not found");
-			}
-
-			StartWaterWatcher();
-			Log("water watcher started");
+		if (a_msg->type != F4SE::MessagingInterface::kGameDataReady) {
+			return;
 		}
+
+		std::string where;
+		g_dofSetting = FindDoFSetting(where);
+		if (!g_dofSetting) {
+			Log("DoF setting NOT found: " + where);
+			return;  // 設定が無ければ何もできないので、監視も始めない
+		}
+
+		// 起動時は常にDoF無効
+		g_dofSetting->SetBinary(false);
+		Log("DoF setting found in " + where);
+
+		if (auto ui = RE::UI::GetSingleton()) {
+			ui->RegisterSink(MenuSink::GetSingleton());
+		} else {
+			Log("UI singleton not found");
+		}
+
+		StartWaterWatcher();
 	}
 }
 
@@ -292,8 +264,6 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
 		Log("F4SE::Init threw an unknown exception");
 		return false;
 	}
-
-	Log("PipboyDoF loaded");
 
 	if (auto messaging = F4SE::GetMessagingInterface()) {
 		messaging->RegisterListener(OnF4SEMessage);
