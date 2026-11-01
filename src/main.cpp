@@ -2,7 +2,7 @@
 //
 // 普段は被写界深度(DoF)を無効にし、次の間だけ有効にする:
 //   - Pip-Boyメニューを開いている間
-//   - 水中にいる間(泳いでいる/潜っている間)
+//   - 水に潜っている間(水面を泳いでいるだけの間は無効)
 // DoFの設定は Fallout4Prefs.ini の bDoDepthOfField(セクション [Imagespace])。
 //
 // ログ: ドキュメント\My Games\Fallout4\F4SE\PipboyDoF.log (起動のたびに作り直される)
@@ -34,11 +34,14 @@ namespace
 	// true にすると、すべてのメニューの開閉と、DoF切り替えのたびのログを出す(不具合調査用)
 	constexpr bool kVerbose = false;
 
-	// true にすると、水中判定に使う値(moveModeとunderWaterTimer)が変化するたびにログを出す。
-	// 水中判定が正しく動くか確認するための一時的な診断用。確認できたら false にする。
-	constexpr bool kLogWaterState = true;
+	// true にすると、水中判定に使う値(moveModeとunderWaterTimer)が変化するたびにログを出す(調査用)。
+	constexpr bool kLogWaterState = false;
 
-	// 泳ぎ状態を表す moveMode のビット位置(Skyrimと同じ並びなら 10)。ログで確認する。
+	// false: 泳いでいる間(水面を含む)と、潜っている間にDoFを有効にする。
+	// true : 完全に潜っている間(頭まで水中)だけDoFを有効にする。
+	constexpr bool kOnlyWhenSubmerged = true;
+
+	// 泳ぎ状態を表す moveMode のビット位置。ログで確認済み(泳ぎ中は 0x0400 が立つ)。
 	constexpr std::uint32_t kSwimBit = 10;
 
 	// DoFの設定名の候補。INIの [セクション] によって名前が変わるため、複数を順に試す。
@@ -163,8 +166,14 @@ namespace
 		a_moveMode = player->moveMode;
 		a_timer = player->underWaterTimer;
 
+		// underWaterTimer は、潜っている間だけ増え、水面に出ると 0 に戻る(ログで確認済み)
+		const bool submerged = a_timer > 0.0f;
+		if (kOnlyWhenSubmerged) {
+			return submerged;
+		}
+
 		const bool swimming = ((a_moveMode >> kSwimBit) & 1u) != 0;
-		return swimming || a_timer > 0.0f;
+		return swimming || submerged;
 	}
 
 	void StartWaterWatcher()
